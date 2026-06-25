@@ -1,0 +1,183 @@
+name: Jira AI Analysis (Reusable)
+
+on:
+  workflow_call:
+    secrets:
+      MAAS_API_KEY:
+        required: true
+        description: "API key for MAAS Claude endpoint"
+      JIRA_API_TOKEN:
+        required: true
+        description: "Jira API token"
+      JIRA_EMAIL:
+        required: true
+        description: "Jira user email"
+
+jobs:
+  analyze-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Need previous commit for diff
+
+      - name: Check for .jira file
+        id: check_jira
+        run: |
+          if [ -f .jira ]; then
+            TICKET=$(cat .jira | grep -v '^#' | grep -v '^$' | head -1 | xargs)
+            echo "ticket=$TICKET" >> $GITHUB_OUTPUT
+            echo "✅ Found Jira ticket: $TICKET"
+          else
+            echo "⏭️  No .jira file found, skipping Jira integration"
+            echo "ticket=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get commit diff
+        if: steps.check_jira.outputs.ticket != ''
+        id: get_diff
+        run: |
+          COMMIT_MSG=$(git log -1 --pretty=format:"%s%n%n%b")
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          DIFF=$(git show HEAD --format="" --patch)
+
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+
+          # Save to files for easier handling
+          echo "$COMMIT_MSG" > /tmp/commit_msg.txt
+          echo "$DIFF" > /tmp/diff.txt
+
+      - name: Analyze with Claude AI
+        if: steps.check_jira.outputs.ticket != ''
+        id: ai_analysis
+        run: |
+          COMMIT_MSG=$(cat /tmp/commit_msg.txt)
+          DIFF=$(cat /tmp/diff.txt)
+
+          # Build the AI prompt
+          PROMPT="Analyze this Git commit and provide:
+          1. A brief summary of changes (2-3 sentences)
+          2. Potential impact or risks
+          3. Testing recommendations
+
+          Commit Message:
+          $COMMIT_MSG
+
+          Code Changes:
+          $DIFF
+
+          Please be concise and focus on what matters for the Jira ticket."
+
+          # Call MAAS API
+          RESPONSE=$(curl -s -X POST https://maas-rhdp.apps.maas.redhatworkshops.io/v1/chat/completions \
+            -H "Authorization: Bearer ${{ secrets.MAAS_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"claude-opus-4-6\",
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": $(echo "$PROMPT" | jq -Rs .)
+              }],
+              \"max_tokens\": 800
+            }")
+
+          # Extract the AI response
+          AI_ANALYSIS=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: Could not get AI analysis"')
+
+          # Save for next step
+          echo "$AI_ANALYSIS" > /tmp/analysis.txt
+          echo "✅ AI Analysis complete"
+
+      - name: Update Jira ticket
+        if: steps.check_jira.outputs.ticket != ''
+        env:
+          JIRA_TICKET: ${{ steps.check_jira.outputs.ticket }}
+          COMMIT_SHA: ${{ steps.get_diff.outputs.commit_sha }}
+        run: |
+          AI_ANALYSIS=$(cat /tmp/analysis.txt)
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          COMMIT_URL="$REPO_URL/commit/${{ github.sha }}"
+
+          # Format the comment for Jira (ADF format)
+          COMMENT_BODY=$(cat <<EOF
+          {
+            "body": {
+              "type": "doc",
+              "version": 1,
+              "content": [
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "🤖 AI Analysis of commit ",
+                      "marks": [{"type": "strong"}]
+                    },
+                    {
+                      "type": "text",
+                      "text": "$COMMIT_SHA",
+                      "marks": [{"type": "code"}]
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Repository: ${{ github.repository }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Commit: ",
+                      "marks": [{"type": "strong"}]
+                    },
+                    {
+                      "type": "text",
+                      "text": "$COMMIT_URL",
+                      "marks": [{"type": "link", "attrs": {"href": "$COMMIT_URL"}}]
+                    }
+                  ]
+                },
+                {
+                  "type": "rule"
+                },
+                {
+                  "type": "paragraph",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "$AI_ANALYSIS"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+          EOF
+          )
+
+          # Post to Jira
+          AUTH_STRING="${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}"
+          AUTH_HEADER=$(echo -n "$AUTH_STRING" | base64)
+
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/jira_response.txt \
+            -X POST "https://redhat.atlassian.net/rest/api/3/issue/$JIRA_TICKET/comment" \
+            -H "Authorization: Basic $AUTH_HEADER" \
+            -H "Content-Type: application/json" \
+            -d "$COMMENT_BODY")
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✅ Successfully updated Jira ticket $JIRA_TICKET"
+          else
+            echo "❌ Failed to update Jira (HTTP $HTTP_CODE)"
+            cat /tmp/jira_response.txt
+            exit 1
+          fi
