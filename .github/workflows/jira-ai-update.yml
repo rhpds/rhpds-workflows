@@ -265,13 +265,67 @@ jobs:
 
           echo "Posting comment to Jira..."
 
+          # Properly escape AI analysis for JSON
+          AI_ESCAPED=$(echo "$AI_ANALYSIS" | jq -Rs .)
+
+          # Build JSON with properly escaped content
+          FINAL_BODY=$(jq -n \
+            --arg pr_num "$PR_NUMBER" \
+            --arg pr_title "$PR_TITLE" \
+            --arg repo "${{ github.repository }}" \
+            --arg pr_url "$PR_URL" \
+            --arg analysis "$AI_ANALYSIS" \
+            '{
+              body: {
+                type: "doc",
+                version: 1,
+                content: [
+                  {
+                    type: "paragraph",
+                    content: [{
+                      type: "text",
+                      text: ("🤖 AI Analysis of PR #" + $pr_num),
+                      marks: [{type: "strong"}]
+                    }]
+                  },
+                  {
+                    type: "paragraph",
+                    content: [{
+                      type: "text",
+                      text: ("Repository: " + $repo)
+                    }]
+                  },
+                  {
+                    type: "paragraph",
+                    content: [{
+                      type: "text",
+                      text: "PR: ",
+                      marks: [{type: "strong"}]
+                    }, {
+                      type: "text",
+                      text: $pr_title,
+                      marks: [{type: "link", attrs: {href: $pr_url}}]
+                    }]
+                  },
+                  {type: "rule"},
+                  {
+                    type: "paragraph",
+                    content: [{
+                      type: "text",
+                      text: $analysis
+                    }]
+                  }
+                ]
+              }
+            }')
+
           # Post to Jira using API v3 with ADF format
           HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/jira_response.txt \
             -X POST "https://redhat.atlassian.net/rest/api/3/issue/$JIRA_TICKET/comment" \
             -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
-            -d "$COMMENT_BODY")
+            -d "$FINAL_BODY")
 
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo ""
@@ -297,8 +351,8 @@ jobs:
             cat /tmp/jira_response.txt
             echo ""
             echo ""
-            echo "Request Body (first 500 chars):"
-            echo "$COMMENT_BODY" | head -c 500
+            echo "Request Body (first 1000 chars):"
+            echo "$FINAL_BODY" | head -c 1000
             echo ""
             echo "════════════════════════════════════════════════"
             exit 1
