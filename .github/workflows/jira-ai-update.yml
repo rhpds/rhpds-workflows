@@ -66,35 +66,40 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "================================================"
           echo "📊 GETTING PR DIFF"
           echo "================================================"
 
-          # Get the entire PR diff (all changes from base to head)
-          echo "Fetching branches..."
-          git fetch origin "$BASE_REF" || { echo "❌ Failed to fetch $BASE_REF"; exit 1; }
-          git fetch origin "$HEAD_REF" || { echo "❌ Failed to fetch $HEAD_REF"; exit 1; }
+          # Get the entire PR diff using the SHA from before the merge
+          # This captures all changes that were in the PR
+          echo "Fetching commits..."
+          echo "Base SHA: $BASE_SHA"
+          echo "Head SHA: $HEAD_SHA"
+
+          git fetch origin "$BASE_SHA" || { echo "❌ Failed to fetch base"; exit 1; }
+          git fetch origin "$HEAD_SHA" || { echo "❌ Failed to fetch head"; exit 1; }
 
           echo "Generating diff..."
-          DIFF=$(git diff "origin/$BASE_REF...origin/$HEAD_REF")
+          DIFF=$(git diff "$BASE_SHA...$HEAD_SHA")
 
           # Get PR metadata
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
-          echo "base_branch=$BASE_REF" >> $GITHUB_OUTPUT
-          echo "head_branch=$HEAD_REF" >> $GITHUB_OUTPUT
 
           # Save diff to file
           echo "$DIFF" > /tmp/diff.txt
 
           LINES_CHANGED=$(echo "$DIFF" | wc -l)
+          FILES_CHANGED=$(echo "$DIFF" | grep -c "^diff --git" || echo "0")
+
           echo ""
           echo "✅ PR diff generated successfully"
           echo "   Lines changed: $LINES_CHANGED"
-          echo "   Branch: $HEAD_REF → $BASE_REF"
+          echo "   Files changed: $FILES_CHANGED"
+          echo "   Commits: $BASE_SHA → $HEAD_SHA"
           echo ""
           echo "================================================"
 
@@ -104,8 +109,6 @@ jobs:
         env:
           PR_TITLE: ${{ steps.get_diff.outputs.pr_title }}
           PR_NUMBER: ${{ steps.get_diff.outputs.pr_number }}
-          BASE_BRANCH: ${{ steps.get_diff.outputs.base_branch }}
-          HEAD_BRANCH: ${{ steps.get_diff.outputs.head_branch }}
         run: |
           echo "================================================"
           echo "🤖 ANALYZING WITH AI"
@@ -120,7 +123,6 @@ jobs:
           3. Testing recommendations
 
           Pull Request: #$PR_NUMBER - $PR_TITLE
-          Branch: $HEAD_BRANCH → $BASE_BRANCH
 
           Code Changes:
           $DIFF
