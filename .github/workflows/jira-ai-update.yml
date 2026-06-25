@@ -26,12 +26,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2  # Need previous commit for diff
+          fetch-depth: 0  # Fetch full history for PR diffs
 
       - name: Extract Jira ticket
         id: check_jira
         env:
           INPUT_TICKET: ${{ inputs.jira_ticket }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           TICKET=""
 
@@ -40,9 +41,8 @@ jobs:
             TICKET="$INPUT_TICKET"
             echo "✅ Using provided Jira ticket: $TICKET"
 
-          # Second priority: extract from PR description (if this is a PR event)
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
-            PR_BODY="${{ github.event.pull_request.body }}"
+          # Second priority: extract from PR description
+          elif [ -n "$PR_BODY" ]; then
             TICKET=$(echo "$PR_BODY" | grep -oE '\*\*Jira:\*\*\s*([A-Z]+-[0-9]+)' | grep -oE '[A-Z]+-[0-9]+' | head -1 || echo "")
             if [ -n "$TICKET" ]; then
               echo "✅ Found Jira ticket in PR description: $TICKET"
@@ -60,35 +60,50 @@ jobs:
 
           echo "ticket=$TICKET" >> $GITHUB_OUTPUT
 
-      - name: Get commit diff
+      - name: Get PR diff
         if: steps.check_jira.outputs.ticket != ''
         id: get_diff
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          COMMIT_MSG=$(git log -1 --pretty=format:"%s%n%n%b")
-          COMMIT_SHA=$(git rev-parse --short HEAD)
-          DIFF=$(git show HEAD --format="" --patch)
+          # Get the entire PR diff (all changes from base to head)
+          git fetch origin "$BASE_REF"
+          git fetch origin "$HEAD_REF"
 
-          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          DIFF=$(git diff "origin/$BASE_REF...origin/$HEAD_REF")
 
-          # Save to files for easier handling
-          echo "$COMMIT_MSG" > /tmp/commit_msg.txt
+          # Get PR metadata
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          echo "base_branch=$BASE_REF" >> $GITHUB_OUTPUT
+          echo "head_branch=$HEAD_REF" >> $GITHUB_OUTPUT
+
+          # Save diff to file
           echo "$DIFF" > /tmp/diff.txt
+          echo "✅ Got PR diff: $(echo "$DIFF" | wc -l) lines changed"
 
       - name: Analyze with Claude AI
         if: steps.check_jira.outputs.ticket != ''
         id: ai_analysis
+        env:
+          PR_TITLE: ${{ steps.get_diff.outputs.pr_title }}
+          PR_NUMBER: ${{ steps.get_diff.outputs.pr_number }}
+          BASE_BRANCH: ${{ steps.get_diff.outputs.base_branch }}
+          HEAD_BRANCH: ${{ steps.get_diff.outputs.head_branch }}
         run: |
-          COMMIT_MSG=$(cat /tmp/commit_msg.txt)
           DIFF=$(cat /tmp/diff.txt)
 
-          # Build the AI prompt
-          PROMPT="Analyze this Git commit and provide:
+          # Build the AI prompt for PR analysis
+          PROMPT="Analyze this Pull Request and provide:
           1. A brief summary of changes (2-3 sentences)
           2. Potential impact or risks
           3. Testing recommendations
 
-          Commit Message:
-          $COMMIT_MSG
+          Pull Request: #$PR_NUMBER - $PR_TITLE
+          Branch: $HEAD_BRANCH → $BASE_BRANCH
 
           Code Changes:
           $DIFF
@@ -105,7 +120,7 @@ jobs:
                 \"role\": \"user\",
                 \"content\": $(echo "$PROMPT" | jq -Rs .)
               }],
-              \"max_tokens\": 800
+              \"max_tokens\": 1000
             }")
 
           # Extract the AI response
@@ -119,11 +134,12 @@ jobs:
         if: steps.check_jira.outputs.ticket != ''
         env:
           JIRA_TICKET: ${{ steps.check_jira.outputs.ticket }}
-          COMMIT_SHA: ${{ steps.get_diff.outputs.commit_sha }}
+          PR_NUMBER: ${{ steps.get_diff.outputs.pr_number }}
+          PR_TITLE: ${{ steps.get_diff.outputs.pr_title }}
         run: |
           AI_ANALYSIS=$(cat /tmp/analysis.txt)
           REPO_URL="${{ github.server_url }}/${{ github.repository }}"
-          COMMIT_URL="$REPO_URL/commit/${{ github.sha }}"
+          PR_URL="$REPO_URL/pull/$PR_NUMBER"
 
           # Format the comment for Jira (ADF format)
           COMMENT_BODY=$(cat <<EOF
@@ -137,13 +153,8 @@ jobs:
                   "content": [
                     {
                       "type": "text",
-                      "text": "🤖 AI Analysis of commit ",
+                      "text": "🤖 AI Analysis of PR #$PR_NUMBER",
                       "marks": [{"type": "strong"}]
-                    },
-                    {
-                      "type": "text",
-                      "text": "$COMMIT_SHA",
-                      "marks": [{"type": "code"}]
                     }
                   ]
                 },
@@ -161,13 +172,13 @@ jobs:
                   "content": [
                     {
                       "type": "text",
-                      "text": "Commit: ",
+                      "text": "PR: ",
                       "marks": [{"type": "strong"}]
                     },
                     {
                       "type": "text",
-                      "text": "$COMMIT_URL",
-                      "marks": [{"type": "link", "attrs": {"href": "$COMMIT_URL"}}]
+                      "text": "$PR_TITLE",
+                      "marks": [{"type": "link", "attrs": {"href": "$PR_URL"}}]
                     }
                   ]
                 },
