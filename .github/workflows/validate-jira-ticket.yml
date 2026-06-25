@@ -1,8 +1,7 @@
 name: Validate Jira Ticket
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize]
+  workflow_call:
 
 jobs:
   validate:
@@ -13,13 +12,26 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           # Extract Jira ticket from PR body
-          TICKET=$(echo "$PR_BODY" | grep -oE '\*\*Jira:\*\*\s*([A-Z]+-[0-9]+)' | grep -oE '[A-Z]+-[0-9]+' || echo "")
+          # Supports both form-based templates (### Jira Ticket\n\nTICKET-123)
+          # and markdown templates (**Jira:** TICKET-123)
+
+          # Try form-based format first
+          TICKET=$(echo "$PR_BODY" | grep -A 2 "### Jira Ticket" | grep -oE '[A-Z]+-[0-9]+' | head -1 || echo "")
+
+          # Fallback to markdown format
+          if [ -z "$TICKET" ]; then
+            TICKET=$(echo "$PR_BODY" | grep -oE '\*\*Jira:\*\*\s*([A-Z]+-[0-9]+)' | grep -oE '[A-Z]+-[0-9]+' || echo "")
+          fi
+
+          # Last fallback: just find any ticket pattern in the body
+          if [ -z "$TICKET" ]; then
+            TICKET=$(echo "$PR_BODY" | grep -oE '[A-Z]+-[0-9]+' | head -1 || echo "")
+          fi
 
           if [ -z "$TICKET" ]; then
             echo "❌ Error: No Jira ticket found in PR description"
             echo ""
-            echo "Please add a Jira ticket number in the format:"
-            echo "**Jira:** RHCLOUD-1234"
+            echo "Please add a Jira ticket number (e.g., RHCLOUD-1234)"
             echo ""
             echo "Current PR body:"
             echo "$PR_BODY"
