@@ -66,6 +66,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -88,6 +89,7 @@ jobs:
           # Get PR metadata
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           echo "pr_title=$PR_TITLE" >> $GITHUB_OUTPUT
+          echo "pr_author=$PR_AUTHOR" >> $GITHUB_OUTPUT
 
           # Save diff to file
           echo "$DIFF" > /tmp/diff.txt
@@ -193,6 +195,7 @@ jobs:
           JIRA_TICKET: ${{ steps.check_jira.outputs.ticket }}
           PR_NUMBER: ${{ steps.get_diff.outputs.pr_number }}
           PR_TITLE: ${{ steps.get_diff.outputs.pr_title }}
+          PR_AUTHOR: ${{ steps.get_diff.outputs.pr_author }}
         run: |
           echo "================================================"
           echo "📝 UPDATING JIRA TICKET"
@@ -201,9 +204,11 @@ jobs:
           AI_ANALYSIS=$(cat /tmp/analysis.txt)
           REPO_URL="${{ github.server_url }}/${{ github.repository }}"
           PR_URL="$REPO_URL/pull/$PR_NUMBER"
+          AUTHOR_URL="https://github.com/$PR_AUTHOR"
 
           echo "Ticket: $JIRA_TICKET"
           echo "PR: #$PR_NUMBER - $PR_TITLE"
+          echo "Author: $PR_AUTHOR"
           echo ""
 
           # Format the comment for Jira (ADF format)
@@ -274,8 +279,10 @@ jobs:
           FINAL_BODY=$(jq -n \
             --arg pr_num "$PR_NUMBER" \
             --arg pr_title "$PR_TITLE" \
+            --arg pr_author "$PR_AUTHOR" \
             --arg repo "${{ github.repository }}" \
             --arg pr_url "$PR_URL" \
+            --arg author_url "$AUTHOR_URL" \
             --arg analysis "$AI_ANALYSIS" \
             '{
               body: {
@@ -295,6 +302,17 @@ jobs:
                     content: [{
                       type: "text",
                       text: ("Repository: " + $repo)
+                    }]
+                  },
+                  {
+                    type: "paragraph",
+                    content: [{
+                      type: "text",
+                      text: "Author: "
+                    }, {
+                      type: "text",
+                      text: ("@" + $pr_author),
+                      marks: [{type: "link", attrs: {href: $author_url}}]
                     }]
                   },
                   {
