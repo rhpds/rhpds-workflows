@@ -69,10 +69,16 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          # Get the entire PR diff (all changes from base to head)
-          git fetch origin "$BASE_REF"
-          git fetch origin "$HEAD_REF"
+          echo "================================================"
+          echo "📊 GETTING PR DIFF"
+          echo "================================================"
 
+          # Get the entire PR diff (all changes from base to head)
+          echo "Fetching branches..."
+          git fetch origin "$BASE_REF" || { echo "❌ Failed to fetch $BASE_REF"; exit 1; }
+          git fetch origin "$HEAD_REF" || { echo "❌ Failed to fetch $HEAD_REF"; exit 1; }
+
+          echo "Generating diff..."
           DIFF=$(git diff "origin/$BASE_REF...origin/$HEAD_REF")
 
           # Get PR metadata
@@ -83,7 +89,14 @@ jobs:
 
           # Save diff to file
           echo "$DIFF" > /tmp/diff.txt
-          echo "✅ Got PR diff: $(echo "$DIFF" | wc -l) lines changed"
+
+          LINES_CHANGED=$(echo "$DIFF" | wc -l)
+          echo ""
+          echo "✅ PR diff generated successfully"
+          echo "   Lines changed: $LINES_CHANGED"
+          echo "   Branch: $HEAD_REF → $BASE_REF"
+          echo ""
+          echo "================================================"
 
       - name: Analyze with Claude AI
         if: steps.check_jira.outputs.ticket != ''
@@ -94,6 +107,10 @@ jobs:
           BASE_BRANCH: ${{ steps.get_diff.outputs.base_branch }}
           HEAD_BRANCH: ${{ steps.get_diff.outputs.head_branch }}
         run: |
+          echo "================================================"
+          echo "🤖 ANALYZING WITH AI"
+          echo "================================================"
+
           DIFF=$(cat /tmp/diff.txt)
 
           # Build the AI prompt for PR analysis
@@ -110,8 +127,11 @@ jobs:
 
           Please be concise and focus on what matters for the Jira ticket."
 
+          echo "Calling MAAS API..."
+
           # Call MAAS API
-          RESPONSE=$(curl -s -X POST https://maas-rhdp.apps.maas.redhatworkshops.io/v1/chat/completions \
+          HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/maas_response.txt \
+            -X POST https://maas-rhdp.apps.maas.redhatworkshops.io/v1/chat/completions \
             -H "Authorization: Bearer ${{ secrets.MAAS_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d "{
@@ -123,12 +143,47 @@ jobs:
               \"max_tokens\": 1000
             }")
 
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "════════════════════════════════════════════════"
+            echo "❌ MAAS API FAILED"
+            echo "════════════════════════════════════════════════"
+            echo ""
+            echo "HTTP Status Code: $HTTP_CODE"
+            echo ""
+            echo "Response:"
+            cat /tmp/maas_response.txt
+            echo ""
+            echo "════════════════════════════════════════════════"
+            exit 1
+          fi
+
+          RESPONSE=$(cat /tmp/maas_response.txt)
+
           # Extract the AI response
-          AI_ANALYSIS=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // "Error: Could not get AI analysis"')
+          AI_ANALYSIS=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
+
+          if [ -z "$AI_ANALYSIS" ]; then
+            echo "════════════════════════════════════════════════"
+            echo "❌ AI ANALYSIS FAILED"
+            echo "════════════════════════════════════════════════"
+            echo ""
+            echo "Could not extract AI response from MAAS API"
+            echo ""
+            echo "Full Response:"
+            echo "$RESPONSE"
+            echo ""
+            echo "════════════════════════════════════════════════"
+            exit 1
+          fi
 
           # Save for next step
           echo "$AI_ANALYSIS" > /tmp/analysis.txt
-          echo "✅ AI Analysis complete"
+
+          echo ""
+          echo "✅ AI analysis completed successfully"
+          echo "   Analysis length: ${#AI_ANALYSIS} characters"
+          echo ""
+          echo "================================================"
 
       - name: Update Jira ticket
         if: steps.check_jira.outputs.ticket != ''
@@ -137,9 +192,17 @@ jobs:
           PR_NUMBER: ${{ steps.get_diff.outputs.pr_number }}
           PR_TITLE: ${{ steps.get_diff.outputs.pr_title }}
         run: |
+          echo "================================================"
+          echo "📝 UPDATING JIRA TICKET"
+          echo "================================================"
+
           AI_ANALYSIS=$(cat /tmp/analysis.txt)
           REPO_URL="${{ github.server_url }}/${{ github.repository }}"
           PR_URL="$REPO_URL/pull/$PR_NUMBER"
+
+          echo "Ticket: $JIRA_TICKET"
+          echo "PR: #$PR_NUMBER - $PR_TITLE"
+          echo ""
 
           # Format the comment for Jira (ADF format)
           COMMENT_BODY=$(cat <<EOF
@@ -200,20 +263,43 @@ jobs:
           EOF
           )
 
-          # Post to Jira
-          AUTH_STRING="${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}"
-          AUTH_HEADER=$(echo -n "$AUTH_STRING" | base64)
+          echo "Posting comment to Jira..."
 
+          # Post to Jira using API v3 with ADF format
           HTTP_CODE=$(curl -s -w "%{http_code}" -o /tmp/jira_response.txt \
             -X POST "https://redhat.atlassian.net/rest/api/3/issue/$JIRA_TICKET/comment" \
-            -H "Authorization: Basic $AUTH_HEADER" \
+            -u "${{ secrets.JIRA_EMAIL }}:${{ secrets.JIRA_API_TOKEN }}" \
             -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
             -d "$COMMENT_BODY")
 
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "✅ Successfully updated Jira ticket $JIRA_TICKET"
+            echo ""
+            echo "════════════════════════════════════════════════"
+            echo "✅ JIRA UPDATE SUCCESSFUL"
+            echo "════════════════════════════════════════════════"
+            echo ""
+            echo "🎫 Updated ticket: $JIRA_TICKET"
+            echo "🔗 View ticket: https://redhat.atlassian.net/browse/$JIRA_TICKET"
+            echo "🔗 View PR: $PR_URL"
+            echo ""
+            echo "════════════════════════════════════════════════"
           else
-            echo "❌ Failed to update Jira (HTTP $HTTP_CODE)"
+            echo ""
+            echo "════════════════════════════════════════════════"
+            echo "❌ JIRA UPDATE FAILED"
+            echo "════════════════════════════════════════════════"
+            echo ""
+            echo "HTTP Status Code: $HTTP_CODE"
+            echo "Ticket: $JIRA_TICKET"
+            echo ""
+            echo "Response from Jira API:"
             cat /tmp/jira_response.txt
+            echo ""
+            echo ""
+            echo "Request Body (first 500 chars):"
+            echo "$COMMENT_BODY" | head -c 500
+            echo ""
+            echo "════════════════════════════════════════════════"
             exit 1
           fi
